@@ -1,0 +1,33 @@
+{
+  "mana_bar_start": [
+    -154,
+    7
+  ],
+  "mana_bar_end": [
+    -68,
+    7
+  ],
+  "mana_max": 605,
+  "mana_threshold": 400,
+  "blank_rune_position": [
+    -336,
+    507
+  ],
+  "hand_slot": [
+    -339,
+    378
+  ],
+  "backpack_position": [
+    -331,
+    562
+  ],
+  "food_position": [
+    -265,
+    376
+  ],
+  "hotkey": "%",
+  "wait_after_hotkey": 1,
+  "food_interval_seconds": 180,
+  "total_runes": 20
+  
+}
