@@ -1,33 +1,43 @@
 {
   "mana_bar_start": [
-    -154,
-    7
+    798,
+    86
   ],
   "mana_bar_end": [
-    -68,
-    7
+    1170,
+    86
   ],
-  "mana_max": 605,
-  "mana_threshold": 400,
-  "blank_rune_position": [
-    -336,
-    507
+  "mana_max": 875,
+  "mana_threshold": 200,
+  "hp_bar_start": [
+    384,
+    90
   ],
+  "hp_bar_end": [
+    775,
+    90
+  ],
+  "hp_max": 325,
+  "hp_threshold": 200,
+  "hp_hotkey": "!",
+  "num_bps": 1,
+  "bp_positions": [
+    [
+      1877,
+      725
+    ]
+  ],
+  "runes_per_bp": 20,
+  "total_runes": 20,
   "hand_slot": [
-    -339,
-    378
-  ],
-  "backpack_position": [
-    -331,
-    562
+    1837,
+    319
   ],
   "food_position": [
-    -265,
-    376
+    778,
+    488
   ],
-  "hotkey": "%",
-  "wait_after_hotkey": 1,
   "food_interval_seconds": 180,
-  "total_runes": 20
-  
+  "hotkey": "%",
+  "wait_after_hotkey": 2.0
 }

@@ -2,7 +2,8 @@
 Bot de runemaking.
 Lê a mana da tela e executa a sequência quando atingir o valor configurado.
 Clica com botão direito na comida periodicamente.
-Para quando atingir a quantidade de runas configurada.
+Suporta múltiplas BPs de blank rune — avança para a próxima quando termina a atual.
+Monitora HP em paralelo e dispara hotkey de defesa quando HP baixa.
 
 Uso:
     python3 bot.py
@@ -18,11 +19,14 @@ Requisitos:
 import json
 import time
 import sys
+import os
 from threading import Event
 
 import pyautogui
 import mss
 from pynput import keyboard
+
+from hp_monitor import HPMonitor
 
 CONFIG_FILE = "config.json"
 
@@ -31,9 +35,7 @@ running = Event()
 running.set()
 paused = Event()
 
-# Para segurança: mover o mouse pro canto superior esquerdo aborta o pyautogui
 pyautogui.FAILSAFE = True
-# Pequena pausa entre comandos de mouse (ajuda em jogos)
 pyautogui.PAUSE = 0.05
 
 
@@ -46,27 +48,33 @@ def load_config():
         print("   Rode 'python3 setup.py' primeiro.")
         sys.exit(1)
 
-    # valores padrão para configs antigas
-    config.setdefault("total_runes", 20)
+    # validação básica das chaves necessárias
+    required = [
+        "mana_bar_start", "mana_bar_end", "mana_max", "mana_threshold",
+        "hp_bar_start", "hp_bar_end", "hp_max", "hp_threshold", "hp_hotkey",
+        "bp_positions", "hand_slot", "food_position",
+        "hotkey", "wait_after_hotkey",
+    ]
+    missing = [k for k in required if k not in config]
+    if missing:
+        print(f"❌ Config incompleta. Faltam: {', '.join(missing)}")
+        print("   Rode 'python3 setup.py' novamente para reconfigurar.")
+        sys.exit(1)
+
     config.setdefault("food_interval_seconds", 180)
+    config.setdefault("runes_per_bp", 20)
+    config.setdefault("num_bps", len(config["bp_positions"]))
+    config.setdefault("total_runes", config["num_bps"] * config["runes_per_bp"])
+
     return config
 
 
+# ---------- Leitura de mana ----------
 def is_blue_pixel(r, g, b):
-    """
-    Detecta se um pixel pertence à barra de mana (azul).
-    A barra cheia é bem azul; a parte vazia fica escura/cinza.
-    Ajuste os limiares se a detecção falhar.
-    """
     return b > 100 and b > r + 30 and b > g + 20
 
 
 def read_mana_percentage(config, sct):
-    """
-    Lê a porcentagem de preenchimento da barra de mana
-    escaneando pixels da esquerda pra direita.
-    Retorna float entre 0.0 e 1.0.
-    """
     x_start, y = config["mana_bar_start"]
     x_end, _ = config["mana_bar_end"]
 
@@ -74,7 +82,6 @@ def read_mana_percentage(config, sct):
     if bar_width <= 0:
         return 0.0
 
-    # Captura uma linha fina da barra
     region = {
         "left": x_start,
         "top": y - 1,
@@ -82,32 +89,26 @@ def read_mana_percentage(config, sct):
         "height": 3,
     }
     img = sct.grab(region)
-    pixels = img.pixels  # lista de linhas, cada linha é lista de (r,g,b)
-
-    # usa a linha do meio
+    pixels = img.pixels
     middle_row = pixels[len(pixels) // 2]
 
-    # conta pixels azuis consecutivos a partir da esquerda
     filled = 0
     for (r, g, b) in middle_row:
         if is_blue_pixel(r, g, b):
             filled += 1
         else:
-            # se achar um pixel não-azul, para
-            # (tolerância pequena para anti-aliasing)
             break
 
     return filled / bar_width
 
 
 def read_mana_value(config, sct):
-    """Retorna o valor atual de mana em números inteiros."""
     pct = read_mana_percentage(config, sct)
     return int(pct * config["mana_max"])
 
 
+# ---------- Ações ----------
 def drag(from_pos, to_pos, duration=0.25):
-    """Arrasta um item de um ponto para outro."""
     pyautogui.moveTo(from_pos[0], from_pos[1], duration=0.1)
     pyautogui.mouseDown(button="left")
     time.sleep(0.1)
@@ -118,23 +119,24 @@ def drag(from_pos, to_pos, duration=0.25):
 
 
 def press_hotkey(hotkey_str):
-    """Aperta uma hotkey tipo 'shift+5' ou 'f1'."""
     keys = [k.strip().lower() for k in hotkey_str.split("+")]
     pyautogui.hotkey(*keys)
 
 
 def right_click(pos):
-    """Clica com o botão direito em uma posição."""
     pyautogui.moveTo(pos[0], pos[1], duration=0.1)
     time.sleep(0.05)
     pyautogui.rightClick()
     time.sleep(0.15)
 
 
-def do_rune_cycle(config):
-    """Executa um ciclo completo de criação de runa."""
-    print("  → Arrastando blank rune para o slot da mão...")
-    drag(config["blank_rune_position"], config["hand_slot"])
+def do_rune_cycle(config, current_bp_pos):
+    """
+    Executa um ciclo completo de criação de runa usando a BP atual.
+    Pega a blank rune do último slot da BP, cria a runa, devolve no mesmo slot.
+    """
+    print(f"  → Pegando blank rune da BP em {current_bp_pos}...")
+    drag(current_bp_pos, config["hand_slot"])
 
     print(f"  → Apertando hotkey: {config['hotkey']}")
     press_hotkey(config["hotkey"])
@@ -143,21 +145,19 @@ def do_rune_cycle(config):
     print(f"  → Esperando {wait}s...")
     time.sleep(wait)
 
-    print("  → Arrastando runa pronta para a backpack...")
-    drag(config["hand_slot"], config["backpack_position"])
+    print(f"  → Devolvendo runa pronta para a BP em {current_bp_pos}...")
+    drag(config["hand_slot"], current_bp_pos)
 
 
 def eat_food(config):
-    """Clica com botão direito na comida."""
     print("🍖 Comendo...")
     right_click(config["food_position"])
 
 
 def play_done_sound():
-    """Toca 3 beeps para avisar que terminou."""
+    """Som de conclusão: Glass 3 vezes."""
     try:
         if sys.platform == "darwin":
-            import os
             for _ in range(3):
                 os.system("afplay /System/Library/Sounds/Glass.aiff &")
                 time.sleep(0.4)
@@ -169,8 +169,8 @@ def play_done_sound():
         pass
 
 
+# ---------- Listener de teclado ----------
 def on_key_press(key):
-    """Listener de teclado global para pausar/parar."""
     try:
         if key == keyboard.Key.f8:
             if paused.is_set():
@@ -187,19 +187,27 @@ def on_key_press(key):
         pass
 
 
+# ---------- Main ----------
 def main():
     config = load_config()
+
     total_runes = config["total_runes"]
     food_interval = config["food_interval_seconds"]
+    num_bps = config["num_bps"]
+    runes_per_bp = config["runes_per_bp"]
+    bp_positions = config["bp_positions"]
 
     print("=" * 60)
     print("  BOT DE RUNEMAKING")
     print("=" * 60)
     print(f"  Mana máxima:      {config['mana_max']}")
-    print(f"  Gatilho:          {config['mana_threshold']}")
-    print(f"  Hotkey:           {config['hotkey']}")
-    print(f"  Espera:           {config['wait_after_hotkey']}s")
-    print(f"  Runas a criar:    {total_runes}")
+    print(f"  Mana gatilho:     {config['mana_threshold']}")
+    print(f"  HP máximo:        {config['hp_max']}")
+    print(f"  HP threshold:     {config['hp_threshold']}")
+    print(f"  HP hotkey:        {config['hp_hotkey']}")
+    print(f"  Runa hotkey:      {config['hotkey']}")
+    print(f"  Espera runa:      {config['wait_after_hotkey']}s")
+    print(f"  BPs de blank:     {num_bps} × {runes_per_bp} = {total_runes} runas")
     print(f"  Intervalo comida: {food_interval}s")
     print("=" * 60)
     print("  F8  = pausar/despausar")
@@ -210,14 +218,20 @@ def main():
     time.sleep(3)
     print("🟢 Rodando...\n")
 
-    # inicia listener de teclado em background
+    # listener de teclado
     listener = keyboard.Listener(on_press=on_key_press)
     listener.start()
+
+    # inicia monitor de HP em thread paralela
+    hp_monitor = HPMonitor(config, log_callback=lambda msg: print(msg))
+    hp_monitor.start()
 
     threshold = config["mana_threshold"]
     runes_made = 0
     last_food_time = time.time()
     stop_reason = "Parado pelo usuário"
+    current_bp_index = 0  # qual BP estamos usando (0-indexed)
+    runes_this_bp = 0     # quantas runas já foram feitas com a BP atual
 
     try:
         with mss.mss() as sct:
@@ -226,31 +240,50 @@ def main():
                     time.sleep(0.2)
                     continue
 
-                # checa se precisa comer
+                # comida
                 now = time.time()
                 if now - last_food_time >= food_interval:
-                    print()  # quebra a linha de status
+                    print()
                     eat_food(config)
                     last_food_time = now
 
                 mana = read_mana_value(config, sct)
 
                 # status no terminal
-                elapsed_since_food = int(time.time() - last_food_time)
-                next_food_in = max(0, food_interval - elapsed_since_food)
+                elapsed_food = int(time.time() - last_food_time)
+                next_food_in = max(0, food_interval - elapsed_food)
                 sys.stdout.write(
                     f"\rMana: {mana:<5} | Runas: {runes_made}/{total_runes} | "
-                    f"Próx comida em: {next_food_in}s    "
+                    f"BP: {current_bp_index + 1}/{num_bps} "
+                    f"({runes_this_bp}/{runes_per_bp}) | "
+                    f"Próx comida: {next_food_in}s   "
                 )
                 sys.stdout.flush()
 
                 if mana >= threshold:
+                    current_bp_pos = bp_positions[current_bp_index]
                     runes_made += 1
-                    print(f"\n\n⚡ Runa {runes_made}/{total_runes} — mana em {mana}")
-                    do_rune_cycle(config)
+                    runes_this_bp += 1
+
+                    print(
+                        f"\n\n⚡ Runa {runes_made}/{total_runes} "
+                        f"(BP {current_bp_index + 1}, slot {runes_this_bp}/{runes_per_bp}) "
+                        f"— mana em {mana}"
+                    )
+                    do_rune_cycle(config, current_bp_pos)
                     print(f"✓ Runa {runes_made} criada\n")
 
-                    # chegou no limite? para e toca o som
+                    # terminou esta BP? avança para a próxima
+                    if runes_this_bp >= runes_per_bp:
+                        current_bp_index += 1
+                        runes_this_bp = 0
+                        if current_bp_index < num_bps:
+                            print(
+                                f"📦 BP {current_bp_index} esgotada. "
+                                f"Avançando para BP {current_bp_index + 1}.\n"
+                            )
+
+                    # chegou no total de runas? fim
                     if runes_made >= total_runes:
                         print("=" * 60)
                         print(f"🎉 {total_runes} runas criadas!")
@@ -259,7 +292,6 @@ def main():
                         play_done_sound()
                         break
 
-                    # pequena pausa antes de voltar a monitorar
                     time.sleep(0.3)
                 else:
                     time.sleep(0.2)
@@ -271,9 +303,11 @@ def main():
         print("\n🛑 Interrompido pelo usuário.")
         stop_reason = "Ctrl+C"
     finally:
+        hp_monitor.stop()
         listener.stop()
         print(f"\n📊 Motivo da parada: {stop_reason}")
         print(f"📊 Total de runas criadas: {runes_made}")
+        print(f"📊 BPs usadas: {current_bp_index + (1 if runes_this_bp > 0 else 0)}/{num_bps}")
 
 
 if __name__ == "__main__":
